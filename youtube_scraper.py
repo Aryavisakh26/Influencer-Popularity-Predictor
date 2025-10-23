@@ -1,12 +1,12 @@
 # ------------------------------------------------------------
-# YouTube Influencer Data Collector (Extended Version)
-# Based on your working 9-column version, now with 18 columns
+# YouTube Influencer Data Collector (Extended Version + Comments + Age)
 # ------------------------------------------------------------
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import pandas as pd
 import time
 import os
+from datetime import datetime
 
 # ======= 1. API KEYS ========================================================
 API_KEYS = [
@@ -133,6 +133,43 @@ for keyword in search_keywords:
     time.sleep(2)
 
 
+# ======= Helper: Get Comment Count from Recent Videos =======================
+def get_comment_count(upload_playlist_id, max_videos=10):
+    """Fetch total comments from the last few uploaded videos."""
+    try:
+        youtube = get_youtube_service()
+        request = youtube.playlistItems().list(
+            part="contentDetails",
+            playlistId=upload_playlist_id,
+            maxResults=max_videos,
+        )
+        response = request.execute()
+
+        video_ids = [
+            item["contentDetails"]["videoId"] for item in response.get("items", [])
+        ]
+        if not video_ids:
+            return 0
+
+        total_comments = 0
+        for i in range(0, len(video_ids), 50):
+            ids_chunk = video_ids[i : i + 50]
+            vid_request = youtube.videos().list(
+                part="statistics",
+                id=",".join(ids_chunk),
+            )
+            vid_response = vid_request.execute()
+            for vid in vid_response.get("items", []):
+                stats = vid.get("statistics", {})
+                total_comments += int(stats.get("commentCount", 0))
+
+        return total_comments
+
+    except Exception as e:
+        print(f"⚠️ Error getting comment count: {e}")
+        return 0
+
+
 # ======= 6. GET CHANNEL DETAILS (EXTENDED) ==================================
 for i in range(0, len(all_channel_ids), 50):
     batch = all_channel_ids[i : i + 50]
@@ -156,6 +193,24 @@ for i in range(0, len(all_channel_ids), 50):
             content = item.get("contentDetails", {})
             topics = item.get("topicDetails", {}).get("topicCategories", [])
 
+            # Account age calculation
+            published_at = snippet.get("publishedAt", "")
+            account_age_years = 0
+            if published_at:
+                try:
+                    created_date = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ")
+                    account_age_years = round(
+                        (datetime.now() - created_date).days / 365, 2
+                    )
+                except:
+                    account_age_years = 0
+
+            # Comment count from recent videos
+            uploads_id = content.get("relatedPlaylists", {}).get("uploads", "")
+            comment_count = (
+                get_comment_count(uploads_id, max_videos=10) if uploads_id else 0
+            )
+
             if cid not in collected_ids:
                 data.append(
                     {
@@ -165,15 +220,19 @@ for i in range(0, len(all_channel_ids), 50):
                         "Subscribers": int(stats.get("subscriberCount", 0)),
                         "Total_Views": int(stats.get("viewCount", 0)),
                         "Total_Videos": int(stats.get("videoCount", 0)),
+                        "Comment_Count": comment_count,
+                        "Account_Age_Years": account_age_years,
                         "Description": snippet.get("description", ""),
-                        "PublishedAt": snippet.get("publishedAt", ""),
+                        "PublishedAt": published_at,
                         "Country": snippet.get("country", "IN"),
                         "Custom_URL": branding.get("customUrl", ""),
                         "Keywords": branding.get("keywords", ""),
                         "Profile_Country": branding.get("country", ""),
-                        "Playlist_ID": content.get("relatedPlaylists", {}).get("uploads", ""),
+                        "Playlist_ID": uploads_id,
                         "Topic_Categories": ", ".join(topics) if topics else "N/A",
-                        "Banner_Image": branding.get("image", {}).get("bannerExternalUrl", ""),
+                        "Banner_Image": branding.get("image", {}).get(
+                            "bannerExternalUrl", ""
+                        ),
                         "Default_Language": snippet.get("defaultLanguage", "N/A"),
                     }
                 )
@@ -199,6 +258,6 @@ df["Popularity_Label"] = pd.cut(
     labels=["Low", "Medium", "High"],
 )
 
-# ======= 8. SAVE FINAL CSV ===================================================
+# ======= 8. SAVE FINAL CSV ==================================================
 df.to_csv("youtube_influencers_extended.csv", index=False)
 print(f"✅ Data saved to youtube_influencers_extended.csv | Total channels: {len(df)}")
